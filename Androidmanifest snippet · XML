@@ -1,0 +1,42 @@
+<!-- Add inside <manifest> -->
+<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+<uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.health.READ_SLEEP" />
+<uses-permission android:name="android.permission.health.READ_STEPS" />
+
+<!-- Add inside <application> -->
+<service
+    android:name=".service.AppBlockerAccessibilityService"
+    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+    android:exported="false">
+    <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+    </intent-filter>
+    <meta-data
+        android:name="android.accessibilityservice"
+        android:resource="@xml/accessibility_service_config" />
+</service>
+
+<activity
+    android:name=".ui.InterceptionOverlayActivity"
+    android:exported="false"
+    android:launchMode="singleTop"
+    android:theme="@style/Theme.FocusAgent.FullScreen"
+    android:excludeFromRecents="true" />
+
+<!--
+  IMPORTANT — this is the step people forget:
+  AccessibilityService cannot be enabled programmatically. You must deep-link the
+  user to system settings on first run:
+
+      val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+      startActivity(intent)
+
+  and show them, with a screenshot/animation, exactly which toggle to flip
+  ("FocusAgent" under Installed Services). This is a one-time friction point —
+  budget real onboarding-UX effort here, it's the #1 place users drop off.
+-->
