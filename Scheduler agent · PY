@@ -1,0 +1,170 @@
+"""
+Phase 4: The Daily AI Scheduler backend.
+
+Endpoint: POST /generate-schedule
+Input:    aggregated, on-device-computed context (never raw accessibility events)
+Output:   JSON list of alarm/study blocks the phone's AlarmScheduler consumes directly.
+
+Run with: uvicorn scheduler_agent:app --reload --port 8000
+"""
+
+import json
+import os
+from datetime import date
+from typing import Literal
+
+import anthropic
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="Focus Agent Scheduler")
+client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+MODEL = "claude-sonnet-4-6"  # swap for whichever current model string you're provisioned for
+
+
+# ---------------------------------------------------------------------------
+# Request/response schemas
+# ---------------------------------------------------------------------------
+
+class Assignment(BaseModel):
+    title: str
+    category: Literal["coursework", "nptel", "cad_project", "drone_project"]
+    due_date: str | None = None
+    estimated_hours: float | None = None
+    priority: int = 3
+
+
+class UsageSummary(BaseModel):
+    app_category: str
+    total_minutes: int
+    open_count: int
+    late_night_opens: int = 0
+
+
+class DailyCheckinRequest(BaseModel):
+    checkin_type: Literal["morning", "night"]
+    log_date: str = Field(default_factory=lambda: date.today().isoformat())
+
+    # profile snapshot (sent each call — backend stays stateless)
+    target_wake_time: str
+    target_sleep_time: str
+    target_sleep_hours: float
+    college_start_time: str
+    college_end_time: str
+    study_style: str
+
+    # last night / today's aggregated signals
+    sleep_minutes: int | None = None
+    steps: int | None = None
+    usage_summary: list[UsageSummary] = []
+
+    # workload
+    pending_assignments: list[Assignment] = []
+
+
+class AlarmBlock(BaseModel):
+    type: Literal["wake", "sleep_wind_down", "study_block", "break"]
+    time: str  # "HH:MM", 24hr
+    label: str
+
+
+class ScheduleResponse(BaseModel):
+    log_date: str
+    summary: str  # one or two sentences, shown to the user in the app
+    blocks: list[AlarmBlock]
+
+
+# ---------------------------------------------------------------------------
+# The agent
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """You are a daily scheduling agent for an ECE engineering student in \
+India. You receive: sleep/step data, screen-usage summaries by category, and a list \
+of pending academic work (coursework, NPTEL deadlines, CAD/Onshape projects, drone \
+projects). Your ONLY job is to output a realistic day plan as alarm/study blocks.
+
+Rules for building the plan:
+1. Respect target_wake_time and target_sleep_time as anchors unless last night's \
+sleep data strongly suggests a deficit worth correcting gradually (never swing more \
+than 30 minutes from target in one day).
+2. Never schedule study blocks during college_start_time-college_end_time.
+3. Prioritize assignments by due_date proximity and priority; if estimated_hours \
+existsdistribute that many total minutes across the evening in blocks matching the \
+student's study_style (pomodoro = 25/5 cycles, deep-block = 90 minute blocks with one \
+15 minute break, spaced-repetition = several short 15-20 minute blocks spread through \
+the evening).
+4. If usage_summary shows more than 45 minutes on "short_video" or "social" categories, \
+or more than 3 late_night_opens, add one "break" block earlier in the evening as a \
+scheduled release valve — a rigid ban with no outlet backfires. Label it honestly, \
+e.g. "15-min guilt-free scroll break, then it's put away."
+5. Always include exactly one "wake" block and one "sleep_wind_down" block (20-30 min \
+before target_sleep_time — this is when the phone should nudge study material away \
+and suggest winding down, not a hard device lock).
+6. Keep the total number of blocks reasonable: 4-7 for a normal day. Don't over-schedule.
+7. Respond with ONLY a JSON object matching this exact shape, no prose outside it:
+
+{
+  "summary": "<1-2 sentence plain-language summary of today's plan and why>",
+  "blocks": [
+    {"type": "wake"|"sleep_wind_down"|"study_block"|"break", "time": "HH:MM", "label": "<short label>"}
+  ]
+}
+"""
+
+
+def build_user_message(req: DailyCheckinRequest) -> str:
+    payload = {
+        "checkin_type": req.checkin_type,
+        "profile": {
+            "target_wake_time": req.target_wake_time,
+            "target_sleep_time": req.target_sleep_time,
+            "target_sleep_hours": req.target_sleep_hours,
+            "college_start_time": req.college_start_time,
+            "college_end_time": req.college_end_time,
+            "study_style": req.study_style,
+        },
+        "signals": {
+            "sleep_minutes": req.sleep_minutes,
+            "steps": req.steps,
+            "usage_summary": [u.model_dump() for u in req.usage_summary],
+        },
+        "pending_assignments": [a.model_dump() for a in req.pending_assignments],
+    }
+    return json.dumps(payload, indent=2)
+
+
+@app.post("/generate-schedule", response_model=ScheduleResponse)
+def generate_schedule(req: DailyCheckinRequest) -> ScheduleResponse:
+    try:
+        message = client.messages.create(
+            model=MODEL,
+            max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": build_user_message(req)}],
+        )
+        raw_text = "".join(
+            block.text for block in message.content if block.type == "text"
+        ).strip()
+
+        # Defensive parsing: strip accidental markdown fences before json.loads
+        cleaned = raw_text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        parsed = json.loads(cleaned)
+
+        return ScheduleResponse(
+            log_date=req.log_date,
+            summary=parsed["summary"],
+            blocks=[AlarmBlock(**b) for b in parsed["blocks"]],
+        )
+
+    except (json.JSONDecodeError, KeyError) as e:
+        # Model returned malformed output — fail loudly rather than send garbage
+        # alarms to the phone. Log raw_text somewhere durable in production.
+        raise HTTPException(status_code=502, detail=f"Agent returned invalid schedule: {e}")
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=502, detail=f"Claude API error: {e}")
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
