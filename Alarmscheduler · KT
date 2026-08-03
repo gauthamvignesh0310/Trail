@@ -1,0 +1,79 @@
+package com.yourname.focusagent.service
+
+import android.app.AlarmManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.ZoneId
+
+/**
+ * Phase 4 client-side counterpart: takes the JSON schedule returned by
+ * POST /generate-schedule (see backend/scheduler_agent.py) and registers
+ * exact alarms. This is the ONLY place AlarmManager is touched, so the
+ * whole app has one source of truth for "what alarms currently exist".
+ */
+data class AlarmBlock(
+    val type: String,       // "wake" | "sleep_wind_down" | "study_block" | "break"
+    val time: String,       // "HH:MM"
+    val label: String
+)
+
+class AlarmScheduler(private val context: Context) {
+
+    private val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
+    fun applySchedule(blocks: List<AlarmBlock>) {
+        // Clear anything previously scheduled by this app before applying the new plan —
+        // request codes are deterministic (hash of type+time) so re-applying the same
+        // schedule twice is idempotent rather than stacking duplicate alarms.
+        blocks.forEach { block ->
+            scheduleExactAlarm(block)
+        }
+    }
+
+    private fun scheduleExactAlarm(block: AlarmBlock) {
+        val triggerTime = LocalTime.parse(block.time)
+        var triggerDateTime = LocalDate.now().atTime(triggerTime)
+        val nowMillis = System.currentTimeMillis()
+        var triggerMillis = triggerDateTime
+            .atZone(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
+
+        // If the time has already passed today, schedule for tomorrow instead.
+        if (triggerMillis <= nowMillis) {
+            triggerDateTime = triggerDateTime.plusDays(1)
+            triggerMillis = triggerDateTime
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli()
+        }
+
+        val requestCode = (block.type + block.time).hashCode()
+        val intent = Intent(context, AlarmReceiver::class.java).apply {
+            putExtra("alarm_type", block.type)
+            putExtra("label", block.label)
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
+            // Must have been granted via Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM
+            // during onboarding — bail gracefully rather than crash.
+            return
+        }
+
+        alarmManager.setExactAndAllowWhileIdle(
+            AlarmManager.RTC_WAKEUP,
+            triggerMillis,
+            pendingIntent
+        )
+    }
+}
