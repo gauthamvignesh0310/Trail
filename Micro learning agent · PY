@@ -1,0 +1,54 @@
+"""
+Feeds the interception overlay (Phase 3) with bite-sized cards. Called by a
+WorkManager job that pre-fetches a batch of ~20 cards whenever the local
+`micro_learning_cards` cache runs low — never called synchronously at the
+moment of interception, so blocking Instagram is never network-latency-bound.
+
+Run alongside scheduler_agent.py, or merge into the same FastAPI app.
+"""
+
+import json
+import os
+from typing import Literal
+
+import anthropic
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI(title="Micro Learning Agent")
+client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+MODEL = "claude-sonnet-4-6"
+
+SYSTEM_PROMPT = """You write bite-sized learning cards for an ECE undergraduate to \
+read in under 60 seconds each, shown instead of Instagram/YouTube Shorts when they \
+try to open those apps. Tone: sharp, concrete, a little fun — never a lecture. Each \
+card teaches exactly ONE idea. Domains you'll be asked for: circuit_theory, vlsi, \
+drone_systems, engineering_ethics, tech_news. Respond with ONLY a JSON array, no prose:
+
+[{"title": "<hook, <8 words>", "body_markdown": "<100-150 words, one concrete idea, \
+end with a one-line 'why it matters' or a quick self-check question>", "difficulty": \
+"undergrad"}]
+"""
+
+
+class CardRequest(BaseModel):
+    domain: Literal["circuit_theory", "vlsi", "drone_systems", "engineering_ethics", "tech_news"]
+    count: int = 10
+    recent_titles: list[str] = []  # avoid repeats
+
+
+@app.post("/micro-learning-batch")
+def generate_batch(req: CardRequest):
+    user_msg = (
+        f"Domain: {req.domain}\nGenerate {req.count} cards.\n"
+        f"Avoid repeating these already-shown titles: {json.dumps(req.recent_titles)}"
+    )
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=2000,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    raw = "".join(b.text for b in message.content if b.type == "text").strip()
+    cleaned = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    return json.loads(cleaned)
