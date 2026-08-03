@@ -1,0 +1,133 @@
+package com.yourname.focusagent.data
+
+import android.content.Context
+import androidx.room.*
+
+// ---------- Entities (mirror 02_database_schema.sql) ----------
+
+@Entity(tableName = "user_profile")
+data class UserProfile(
+    @PrimaryKey val id: Int = 1,
+    val name: String,
+    val courseProgram: String?,
+    val yearOfStudy: Int?,
+    val collegeStartTime: String?,
+    val collegeEndTime: String?,
+    val targetSleepHours: Double = 7.5,
+    val targetWakeTime: String?,
+    val targetSleepTime: String?,
+    val fitnessGoal: String?,
+    val studyStyle: String?,
+    val primaryDistractionsJson: String,   // JSON-encoded List<String>
+    val activeDomainsJson: String          // JSON-encoded List<String>
+)
+
+@Entity(tableName = "app_usage_events")
+data class UsageEvent(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val packageName: String,
+    val eventType: String,   // "opened" | "closed" | "intercepted"
+    val timestamp: Long
+)
+
+@Entity(tableName = "daily_logs")
+data class DailyLog(
+    @PrimaryKey val logDate: String,       // "2026-08-03"
+    val sleepMinutes: Int? = null,
+    val steps: Int? = null,
+    val totalScreenMinutes: Int? = null,
+    val distractionMinutes: Int? = null,
+    val interceptionsCount: Int = 0,
+    val microLearningCompleted: Int = 0,
+    val morningCheckinJson: String? = null,
+    val nightCheckinJson: String? = null
+)
+
+@Entity(tableName = "assignments")
+data class Assignment(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val category: String,       // coursework | nptel | cad_project | drone_project
+    val courseCode: String?,
+    val dueDate: String?,
+    val estimatedHours: Double?,
+    val priority: Int = 3,
+    val status: String = "pending"
+)
+
+// ---------- DAOs ----------
+
+@Dao
+interface UserProfileDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(profile: UserProfile)
+
+    @Query("SELECT * FROM user_profile WHERE id = 1")
+    suspend fun get(): UserProfile?
+}
+
+@Dao
+interface UsageEventDao {
+    @Insert
+    suspend fun insert(event: UsageEvent)
+
+    @Query("SELECT * FROM app_usage_events WHERE timestamp >= :sinceMillis")
+    suspend fun getSince(sinceMillis: Long): List<UsageEvent>
+
+    @Query("DELETE FROM app_usage_events WHERE timestamp < :beforeMillis")
+    suspend fun purgeOlderThan(beforeMillis: Long)
+}
+
+@Dao
+interface DailyLogDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(log: DailyLog)
+
+    @Query("SELECT * FROM daily_logs WHERE logDate = :date")
+    suspend fun getByDate(date: String): DailyLog?
+
+    @Query("SELECT * FROM daily_logs ORDER BY logDate DESC LIMIT :days")
+    suspend fun getRecent(days: Int): List<DailyLog>
+}
+
+@Dao
+interface AssignmentDao {
+    @Insert
+    suspend fun insert(assignment: Assignment)
+
+    @Query("SELECT * FROM assignments WHERE status != 'done' ORDER BY dueDate ASC")
+    suspend fun getPending(): List<Assignment>
+}
+
+// ---------- Database ----------
+
+@Database(
+    entities = [UserProfile::class, UsageEvent::class, DailyLog::class, Assignment::class],
+    version = 1,
+    exportSchema = true
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun userProfileDao(): UserProfileDao
+    abstract fun usageEventDao(): UsageEventDao
+    abstract fun dailyLogDao(): DailyLogDao
+    abstract fun assignmentDao(): AssignmentDao
+
+    companion object {
+        @Volatile private var INSTANCE: AppDatabase? = null
+
+        fun getInstance(context: Context): AppDatabase =
+            INSTANCE ?: synchronized(this) {
+                INSTANCE ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "focus_agent.db"
+                )
+                    // Swap in SupportFactory(SQLiteDatabase.getBytes(passphrase)) via
+                    // the SQLCipher-for-Android-Room artifact for at-rest encryption —
+                    // recommended given this DB stores screen-usage history.
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
+            }
+    }
+}
